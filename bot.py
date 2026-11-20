@@ -1,7 +1,7 @@
 import os
 import re
 
-from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
+from telegram import ReplyKeyboardRemove, ReplyParameters, Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -16,34 +16,23 @@ ADMIN_ID = int(os.environ["ADMIN_ID"])
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL")  # Render o'zi beradi
 PORT = int(os.environ.get("PORT", 10000))
 
-HA = "Ha, roziman"
-YOQ = "Yo'q"
-
 # (kalit, admin uchun nomi, savol matni)
 SAVOLLAR = [
     ("ism", "Ism", "Ismingiz?"),
     ("hudud", "Qayerdan", "Qayerdansiz?"),
+    ("kerak_hudud", "Qayerlik kerak", "Qayerlik kerak?"),
     ("yosh", "Yosh", "Yoshingiz nechida?"),
-    ("boy", "Sm", "Necha sm?"),
-    ("rasm", "Rasm", "Rasmingizni yuboring (1 ta rasm):"),
-    (
-        "rozilik",
-        "18+ roziligi",
-        "Siz 18 yoshdan oshganmisiz va anketa ma'lumotlaringiz "
-        "ko'rib chiqilishiga rozimisiz?",
-    ),
+    ("sm", "Sm (o'zi / kerak)", "Necha sm 👦 yoki necha sm kerak 👩?"),
+    ("rasm", "Rasm", "Rasmingizni yuboring. U faqat adminga ko'rinadi."),
 ]
 
 SAVOL = 0
 
 
 async def savol_ber(update: Update, i: int):
-    key, _, matn = SAVOLLAR[i]
-    if key == "rozilik":
-        kb = ReplyKeyboardMarkup([[HA, YOQ]], one_time_keyboard=True, resize_keyboard=True)
-    else:
-        kb = ReplyKeyboardRemove()
-    await update.message.reply_text(matn, reply_markup=kb)
+    await update.message.reply_text(
+        SAVOLLAR[i][2], reply_markup=ReplyKeyboardRemove()
+    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -70,23 +59,15 @@ async def javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("Iltimos, matn bilan yozing.")
         return SAVOL
 
-    if key in ("yosh", "boy") and not text.isdigit():
-        await update.message.reply_text("Iltimos, faqat raqam bilan yozing.")
-        return SAVOL
-
-    if key == "yosh" and int(text) < 18:
-        await update.message.reply_text(
-            "Kechirasiz, anketa faqat 18 yoshdan oshganlar uchun.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        return ConversationHandler.END
-
-    if key == "rozilik" and text != HA:
-        await update.message.reply_text(
-            "Rozilik bo'lmasa, anketani qabul qila olmaymiz.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        return ConversationHandler.END
+    if key == "yosh":
+        # Har qanday matn qabul qilinadi ("25", "25 yosh"...), bot qotib qolmaydi.
+        # Faqat aniq 18 dan kichik son yozilsa to'xtaydi.
+        son = re.search(r"\d+", text)
+        if son and 0 < int(son.group()) < 18:
+            await msg.reply_text(
+                "Kechirasiz, anketa faqat 18 yoshdan oshganlar uchun."
+            )
+            return ConversationHandler.END
 
     context.user_data[key] = text
     i += 1
@@ -96,24 +77,29 @@ async def javob(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await savol_ber(update, i)
         return SAVOL
 
-    # Anketa tugadi, adminga yuboramiz
+    # Anketa tugadi: adminga yuboramiz
     u = update.effective_user
     qatorlar = ["📝 Yangi anketa", f"ID: {u.id}"]
     if u.username:
         qatorlar.append(f"Username: @{u.username}")
     for k, nom, _ in SAVOLLAR:
-        qatorlar.append(f"{nom}: {context.user_data.get(k)}")
+        if k != "rasm":
+            qatorlar.append(f"{nom}: {context.user_data.get(k)}")
     matn = "\n".join(qatorlar)
-    rasm_id = context.user_data.get("rasm_id")
-    if rasm_id:
-        await context.bot.send_photo(ADMIN_ID, rasm_id, caption=matn)
-    else:
-        await context.bot.send_message(ADMIN_ID, matn)
-    await update.message.reply_text(
-        "Rahmat! Anketangiz yuborildi. Tez orada javob beramiz.",
-        reply_markup=ReplyKeyboardRemove(),
+    await context.bot.send_photo(
+        ADMIN_ID, context.user_data["rasm_id"], caption=matn
     )
+
+    await msg.reply_text("Sizga juft izlanmoqda 🔎")
+    await msg.reply_text("Yuborildi ❤️")
     return ConversationHandler.END
+
+
+async def savolda_boshqa_tur(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Iltimos, savolga matn bilan (yoki so'ralsa, rasm bilan) javob bering."
+    )
+    return SAVOL
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -124,13 +110,62 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin istalgan turdagi xabar bilan reply qilsa, foydalanuvchiga boradi."""
     msg = update.message
     quoted = msg.reply_to_message.text or msg.reply_to_message.caption or ""
     m = re.search(r"ID: (\d+)", quoted)
-    if not m:
+    if m:
+        uid = int(m.group(1))
+    else:
+        uid = context.bot_data.get("map", {}).get(msg.reply_to_message.message_id)
+    if not uid:
+        await msg.reply_text(
+            "Bu xabar egasini topa olmadim. 'ID: ...' yozilgan xabarga reply qiling."
+        )
         return
-    await context.bot.send_message(int(m.group(1)), f"Admin javobi:\n{msg.text}")
+
+    if msg.text:
+        await context.bot.send_message(uid, f"Admin javobi:\n{msg.text}")
+    else:
+        await context.bot.send_message(uid, "Admin javobi:")
+        await context.bot.copy_message(
+            chat_id=uid, from_chat_id=msg.chat_id, message_id=msg.message_id
+        )
     await msg.reply_text("✅ Yuborildi")
+
+
+async def foydalanuvchi_xabari(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Anketadan keyingi xabarlar (matn, rasm, video, ovoz...) adminga boradi."""
+    msg = update.message
+    u = update.effective_user
+    bosh = f"💬 Yangi xabar\nID: {u.id}"
+    if u.username:
+        bosh += f"\nUsername: @{u.username}"
+
+    if msg.text:
+        await context.bot.send_message(ADMIN_ID, bosh + "\n\n" + msg.text)
+    elif (
+        msg.photo or msg.video or msg.voice or msg.audio or msg.document or msg.animation
+    ):
+        # Ma'lumot fayl ostiga yoziladi: hammasi bitta xabar bo'lib keladi
+        sarlavha = (bosh + "\n\n" + (msg.caption or ""))[:1000]
+        await context.bot.copy_message(
+            chat_id=ADMIN_ID,
+            from_chat_id=msg.chat_id,
+            message_id=msg.message_id,
+            caption=sarlavha,
+        )
+    else:
+        # Dumaloq video va stiker ostiga matn yozib bo'lmaydi: ikkita xabar
+        sarlavha = await context.bot.send_message(ADMIN_ID, bosh)
+        nusxa = await context.bot.copy_message(
+            chat_id=ADMIN_ID,
+            from_chat_id=msg.chat_id,
+            message_id=msg.message_id,
+            reply_parameters=ReplyParameters(message_id=sarlavha.message_id),
+        )
+        context.bot_data.setdefault("map", {})[nusxa.message_id] = u.id
+    await msg.reply_text("Yuborildi ❤️")
 
 
 def main():
@@ -138,7 +173,7 @@ def main():
 
     app.add_handler(
         MessageHandler(
-            filters.TEXT & filters.REPLY & filters.User(ADMIN_ID), admin_reply
+            filters.REPLY & filters.User(ADMIN_ID) & ~filters.COMMAND, admin_reply
         )
     )
 
@@ -146,12 +181,20 @@ def main():
         entry_points=[CommandHandler("start", start)],
         states={
             SAVOL: [
-                MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, javob)
+                MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, javob),
+                MessageHandler(
+                    ~filters.COMMAND & ~filters.TEXT & ~filters.PHOTO, savolda_boshqa_tur
+                ),
             ]
         },
         fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
     )
     app.add_handler(conv)
+
+    # Anketadan keyin foydalanuvchi yozgan hamma narsa adminga boradi
+    app.add_handler(
+        MessageHandler(~filters.COMMAND & ~filters.User(ADMIN_ID), foydalanuvchi_xabari)
+    )
 
     if BASE_URL:
         app.run_webhook(
